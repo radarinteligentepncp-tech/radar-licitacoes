@@ -1,0 +1,6 @@
+.streamlit/secrets.toml
+secrets_gerado.toml
+*.json
+.dados/
+__pycache__/
+*.xlsx
