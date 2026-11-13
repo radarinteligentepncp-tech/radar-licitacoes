@@ -50,11 +50,6 @@ from urllib3.util.retry import Retry
 # ---------------------------------------------------------------------------
 st.set_page_config(page_title="Radar de Licitações - PNCP", page_icon="📡", layout="wide")
 
-# Imagem de fundo e logotipo da consultoria (pasta "imagens"; ver identidade_visual.py)
-import identidade_visual  # noqa: E402
-
-identidade_visual.aplicar()
-
 # Controle de acesso: login, solicitação de cadastro e aprovação pelo administrador
 from auth import contar_pendentes, exigir_login, painel_admin  # noqa: E402
 
