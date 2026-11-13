@@ -50,6 +50,11 @@ from urllib3.util.retry import Retry
 # ---------------------------------------------------------------------------
 st.set_page_config(page_title="Radar de Licitações - PNCP", page_icon="📡", layout="wide")
 
+# Imagem de fundo e logotipo da consultoria (pasta "imagens"; ver identidade_visual.py)
+import identidade_visual  # noqa: E402
+
+identidade_visual.aplicar()
+
 # Controle de acesso: login, solicitação de cadastro e aprovação pelo administrador
 from auth import contar_pendentes, exigir_login, painel_admin  # noqa: E402
 
@@ -400,7 +405,21 @@ def executar_varredura(tarefas, max_paginas, nomes_mod, origem, municipios):
 # ---------------------------------------------------------------------------
 # Exportação
 # ---------------------------------------------------------------------------
+RE_CARACTERES_INVALIDOS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+
+
+def _limpar_para_excel(valor):
+    """Remove caracteres de controle invisíveis (vindos de PDF/Word) que o Excel não aceita."""
+    if isinstance(valor, str):
+        return RE_CARACTERES_INVALIDOS.sub(" ", valor)[:32000]  # limite de uma célula do Excel
+    return valor
+
+
 def gerar_excel(df: pd.DataFrame) -> bytes:
+    df = df.copy()
+    for col in df.columns:
+        if not (pd.api.types.is_numeric_dtype(df[col]) or pd.api.types.is_datetime64_any_dtype(df[col])):
+            df[col] = df[col].map(_limpar_para_excel)
     buffer = io.BytesIO()
     with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
         df.to_excel(writer, index=False, sheet_name="Editais")
@@ -693,8 +712,11 @@ mostrar_tabela(f)
 # --- Exportação ---
 carimbo = datetime.now().strftime("%Y%m%d_%H%M")
 d1, d2, _ = st.columns([1, 1, 3])
-d1.download_button("📥 Baixar Excel", gerar_excel(f), file_name=f"Radar_PNCP_{carimbo}.xlsx",
-                   mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+try:
+    d1.download_button("📥 Baixar Excel", gerar_excel(f), file_name=f"Radar_PNCP_{carimbo}.xlsx",
+                       mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+except Exception as exc:  # a tabela e o CSV continuam disponíveis mesmo se o Excel falhar
+    d1.warning(f"Não foi possível gerar o Excel ({type(exc).__name__}). Use o CSV.")
 d2.download_button("📄 Baixar CSV", f.to_csv(index=False, sep=";", encoding="utf-8-sig").encode("utf-8-sig"),
                    file_name=f"Radar_PNCP_{carimbo}.csv", mime="text/csv")
 
