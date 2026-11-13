@@ -15,7 +15,7 @@ Principais recursos:
   dispensa, inexigibilidade, credenciamento, chamada pública, leilão etc.),
   carregadas da própria API, com tabela de contingência embutida.
 - Todas as 27 UFs, filtro opcional por município (código IBGE) e CNPJ do órgão.
-- Palavras-chave sem diferenciar acentos/maiúsculas, com termos de exclusão.
+- Busca inteligente (busca.py): combinação com '+', frase exata, plural/gênero, temas prontos.
 - Distância em linha reta a partir de QUALQUER município do Brasil
   (coordenadas de todos os 5.570 municípios, pelo código IBGE).
 - Requisições em paralelo, com retry/backoff, tratamento de HTTP 429 e
@@ -41,6 +41,7 @@ from datetime import datetime, timedelta
 import pandas as pd
 import requests
 import streamlit as st
+import busca
 from limitador_pncp import LIMITADOR, get_pncp, resumo_erro
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
@@ -449,6 +450,8 @@ def mostrar_tabela(df: pd.DataFrame):
         "Abertura Propostas": st.column_config.DatetimeColumn(format="DD/MM/YYYY HH:mm"),
         "Publicação PNCP": st.column_config.DatetimeColumn(format="DD/MM/YYYY"),
         "Objeto": st.column_config.TextColumn(width="large"),
+        "Por que apareceu": st.column_config.TextColumn(
+            help="Termos da sua busca encontrados no objeto (ou na informação complementar)"),
     }
     try:
         st.dataframe(df, column_config=config, hide_index=True, width="stretch", height=560)
@@ -515,14 +518,33 @@ with st.sidebar:
 
     st.divider()
     st.header("🔎 Palavras-chave")
+
+    def _aplicar_tema():
+        tema = st.session_state.get("tema_busca")
+        if tema in busca.TEMAS:
+            st.session_state["termos_busca"] = busca.TEMAS[tema]["incluir"]
+            st.session_state["excluir_busca"] = busca.TEMAS[tema]["excluir"]
+
+    st.selectbox("Tema pronto (opcional):", ["(nenhum)"] + list(busca.TEMAS), key="tema_busca",
+                 on_change=_aplicar_tema,
+                 help="Preenche os campos abaixo com combinações e exclusões já testadas. "
+                      "Depois você pode editar à vontade.")
     termos_txt = st.text_area(
-        "Incluir (separe por vírgula):", "",
-        placeholder="Em branco = traz tudo. Ex.: veículo, pneu, decoração natalina",
-        help="Acentos e maiúsculas são ignorados; 'pneu' encontra 'pneus' e 'pneumáticos'. "
-             "Depois de digitar, clique fora da caixa (ou Ctrl+Enter) para aplicar.",
+        "Incluir:", key="termos_busca", height=110,
+        placeholder='Em branco = traz tudo. Ex.: pneu, peça + veículo, "oficina mecânica"',
+        help=("**Como escrever:**\n\n"
+              "- `pneu, autopeça` → vírgula = **OU** (basta um)\n"
+              "- `peça + veículo` → **as duas palavras perto uma da outra** "
+              f"(até {busca.JANELA} palavras), em qualquer ordem. Evita trazer 'peças para "
+              "equipamento hospitalar' quando você quer peças de carro.\n"
+              '- `"oficina mecânica"` → **frase exata**\n\n'
+              "Acentos, maiúsculas, plural e gênero são ignorados ('veículo' acha 'veículos'). "
+              "Depois de digitar, clique fora da caixa (ou Ctrl+Enter)."),
     )
-    regra = st.radio("Regra:", ["Qualquer termo", "Todos os termos"], horizontal=True)
-    excluir_txt = st.text_input("Excluir se contiver:", "", placeholder="Ex.: locação com motorista")
+    regra = st.radio("Regra:", ["Qualquer item", "Todos os itens"], horizontal=True)
+    excluir_txt = st.text_input("Excluir se contiver:", key="excluir_busca",
+                                placeholder="Ex.: equipamento + hospitalar, predial",
+                                help="Mesma forma de escrever do campo Incluir.")
     buscar_complemento = st.checkbox("Procurar também em 'Informação complementar'", value=True)
 
     st.divider()
@@ -591,21 +613,17 @@ if df.empty:
     st.stop()
 
 # --- Palavras-chave (aplicadas localmente, permitem ajuste sem nova consulta) ---
-incluir = compilar_termos(termos_txt)
-excluir = compilar_termos(excluir_txt)
-texto_busca = df["Objeto"].fillna("")
+incluir = busca.compilar(termos_txt)
+excluir = busca.compilar(excluir_txt)
+texto_busca = df["Objeto"].fillna("").astype(str)
 if buscar_complemento:
-    texto_busca = texto_busca + " " + df["Info. Complementar"].fillna("")
-texto_busca = texto_busca.map(normalizar)
-
-mascara = pd.Series(True, index=df.index)
-if incluir:
-    agreg = all if regra == "Todos os termos" else any
-    mascara &= texto_busca.map(lambda t: agreg(p.search(t) for p in incluir))
-if excluir:
-    mascara &= ~texto_busca.map(lambda t: any(p.search(t) for p in excluir))
+    texto_busca = texto_busca + " " + df["Info. Complementar"].fillna("").astype(str)
+avaliacoes = texto_busca.map(lambda t: busca.avaliar(t, incluir, excluir, todos=(regra == "Todos os itens")))
+mascara = avaliacoes.map(lambda a: a[0])
 ocultos_palavras = int((~mascara).sum())
 df = df[mascara].copy()
+df["Por que apareceu"] = avaliacoes[mascara].map(lambda a: "; ".join(a[1]))
+df["Aderência"] = avaliacoes[mascara].map(lambda a: a[2])
 
 agora = datetime.now()
 df["Dias p/ Encerrar"] = pd.to_numeric(df["Encerramento Propostas"].map(
@@ -643,7 +661,7 @@ with c6:
     texto_livre = st.text_input("Buscar em órgão/município/objeto:")
 with c7:
     somente_srp = st.checkbox("Somente SRP")
-    ordenar = st.selectbox("Ordenar por:", ["Encerramento", "Distância", "Valor", "Publicação"])
+    ordenar = st.selectbox("Ordenar por:", ["Encerramento", "Aderência", "Distância", "Valor", "Publicação"])
 
 f = df.copy()
 if status_sel:
@@ -669,6 +687,7 @@ if texto_livre:
     f = f[(f["Órgão"] + " " + f["Município"] + " " + f["Objeto"]).map(normalizar).str.contains(alvo, regex=False)]
 
 coluna_ordem = {"Encerramento": ("Encerramento Propostas", True), "Distância": ("Distância (km)", True),
+                "Aderência": ("Aderência", False),
                 "Valor": ("Valor Estimado (R$)", False), "Publicação": ("Publicação PNCP", False)}[ordenar]
 f = f.sort_values(coluna_ordem[0], ascending=coluna_ordem[1], na_position="last")
 
@@ -697,7 +716,7 @@ if f.empty:
     st.stop()
 
 colunas_exibir = ["Status Prazo", "Dias p/ Encerrar", "Encerramento Propostas", "UF", "Município",
-                  "Distância (km)", "Modalidade", "Objeto", "Valor Estimado (R$)", "Órgão",
+                  "Distância (km)", "Modalidade", "Objeto", "Por que apareceu", "Valor Estimado (R$)", "Órgão",
                   "Esfera", "Plataforma", "SRP", "Situação", "Nº Compra", "Link PNCP",
                   "Link Plataforma", "Publicação PNCP", "Abertura Propostas", "Modo de Disputa",
                   "Amparo Legal", "Processo", "Unidade", "Info. Complementar", "Controle PNCP"]
